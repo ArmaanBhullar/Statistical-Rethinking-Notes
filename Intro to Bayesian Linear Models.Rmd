@@ -1,7 +1,10 @@
 ---
 title: "Chapter 4 - Geocentric Models"
+author: Armaan Bhullar (jhaniria@gmail.com)
 output: 
   html_document:
+    number_sections: true
+  pdf_document:
     number_sections: true
 ---
 
@@ -643,13 +646,14 @@ for (i in 1:ncol(B) )
 The above plot shows the values of basis functions over time, at any given year, only few of the num_knots basis functions are active and contribute to the prediction, this helps keep predictions simple.  
 Once we get our basis functions as above, to get rest of the model is just basic linear regression with each column of the matrix B as a variable.  
 
-\start(align*)
 
-T_i &\sim Normal(\mu_i, \sigma)
-\mu_i &= \alpha + \sum_{k=1}^{K}w_kB_{k,i}
-\alpha &\sim Normal(6, 10)
-w_j &\sim Normal(0, 1)
-\sigma &\sim Exponential(1)
+\begin(align*)
+
+T_i &\sim Normal(\mu_i, \sigma) \\
+\mu_i &= \alpha + \sum_{k=1}^{K} \\
+\alpha &\sim Normal(6, 10) \\
+w_j &\sim Normal(0, 1) \\
+\sigma &\sim Exponential(1) \\
 
 \end(align*)
 

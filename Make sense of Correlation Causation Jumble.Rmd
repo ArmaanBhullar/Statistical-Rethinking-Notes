@@ -1,0 +1,524 @@
+---
+title: "Chapter 5 "
+output: 
+  html_document:
+    number_sections: true
+---
+
+Thischapter introduces techniques to handle cases where one variable is correlated with another but ther's no correlation.  
+
+America has many Waffle House diners, how do they relate to divroce rates?  
+
+```{r}
+library(rethinking)
+data(WaffleDivorce)
+d<- WaffleDivorce
+d$WafflesPerPopulation <- d$WaffleHouses/d$Population
+str(d$WafflesPerPopulation)
+plot(WafflesPerPopulation ~ Divorce, data=d)
+
+```
+
+Seems like they are correlated, but this doesn't make sense? That's because Waffle Houses started in Southern States and Southern States have higher divorce rates, in this cases, being Southern is a $confound$.  
+
+To handle such stuff, we use MULTIPLE REGRESSION using more than one predictor variable to simultaneously model the outcome, this let's us :  
+
+1. Statistical Control for Counfounds, confounds are something which mislead us about a causal inference - e.g., Southerness.  
+2. Multiple Causation, plainly, a phenomena may be caused by multiple causes, hence use multiple regression
+3. Interactions, A plant needs both sunlight and water to survice, alone, interaction between 2 causes can have an effect stronger than just 1.  
+
+
+
+In this chapter, we begin to deal with Confounds. We'll add $main$ effects to our model of mean and this will help us to 1) Identify confounds and 2) Reveal correlations that are otherwise masked by other variables. We'll also start to deal with categorical variables.  
+
+## Spurious Association
+
+Does Marriage cause divorce? Does median age at marriage impact divorce rates?
+
+```{r}
+d<- WaffleDivorce
+# standardize variables
+d$A <- scale(d$MedianAgeMarriage) # mean 0, sd 1
+d$D <- scale(d$Divorce)
+
+m5.1<- quap(
+  alist(D ~ dnorm(mu, sigma),
+        mu <- a + bA*A,
+        a ~ dnorm(0, 0.2), # A and D are normalized, hence, should be close to 0
+        bA ~ dnorm(0, 0.5), # bA = 1 => 1 unit sd change in A => 1 unit sd change in D, as sd of median marriage age =1.2 years, setting this as 1 is ctoo strong a prior.
+        sigma ~ dexp(1) # As normalized, should be close to 1
+        ),
+  data=d
+)
+
+set.seed(10)
+prior <- extract.prior(m5.1)
+mu <- link(m5.1, post=prior, data=list(A=c(-2, 2))) # Simulate divorce rate over +- 2 sd of median marriage age, by explicitly providing posterior samples as the prior samples, we force the model to provide only prior based outcomes
+plot(NULL, xlim=c(-2, 2), ylim=c(-2, 2))
+for (i in 1:50) # Plot 50 relationships samples from prior
+  lines(c(-2, 2), mu[i, ], col=col.alpha("black", 0.4))
+```
+
+As we plot the plausible regression lines implied by the priors, we see that these are weakly informative as they allow some impossibly strong relationships. Now let's plot posterior.  
+
+```{r}
+# compute percentile interval of mean
+A_seq <- seq(from=-3, to=3.2, length.out=30)
+mu <- link(m5.1, data=list(A=A_seq)) # plot over broader ranges
+mu.mean <- apply(mu, 2, mean)
+mu.PI <- apply(mu, 2, PI, prob=0.89)
+
+# plot it all
+plot(D~A, data=d, col=rangi2) # plot real data
+lines(A_seq, mu.mean, lwd=2)
+shade(mu.PI, A_seq)
+```
+Damn, our first model to do something useful, our neutral priors got modified to ones showing a strong relationship between median age of marriage and divorce rates.  
+
+Let's fit a model to MArriage rate and divorce rates  
+```{r}
+d$M <- scale(d$Marriage)
+m5.2 <- quap(
+  alist(
+    D ~ dnorm(mu, sigma),
+    mu <- a + bM * M,
+    a ~ dnorm(0, 0.2),
+    bM ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+
+M_seq <- seq(from=-3, to=3.2, length.out=30)
+mu<-link(m5.2, data=list(M=M_seq))
+mu.mean <- apply(mu, 2, mean)
+mu.PI <- apply(mu, 2, PI, prob=0.89)
+
+# plot 
+plot(D~M, data=d)
+lines(M_seq, mu.mean, lwd=2)
+shade(mu.PI, M_seq)
+```
+
+Above plot implies a much weaker relationship between Divorce rates and Marriage rates.
+> But, merely comparing parameter means between different bivariate regressions is no way to decide which predictor is better. Both of these predictors could provide independent value, or they could be redundant, or one could elimintae the value of the other. To make sense of this, we're going to have to think causally. And then, only after we've done some thinking, a bigger regression model that includes both age at marriage and the marriage rate will help us.  
+
+### Think before you regress
+
+Let's take some time to discuss another tool which will help us in our quest for identifying causal relationships.  
+
+```{r}
+library(dagitty)
+dag5.1 <- dagitty("dag { 
+                  A -> D
+                  A -> M
+                  M -> D}")
+
+dag5.2 <- dagitty("dag { 
+                  A -> D
+                  A -> M}")
+
+plot(graphLayout(dag5.1))
+plot(graphLayout(dag5.2))
+```
+
+The 2 DAGs above describe 2 possible models of our problem -  
+1. Age of Marriage (A) influences both Divorce Rate (D) and Marriage Rate (M) and Marriage Rate (M) influences Divorce Rate (D)
+2. A influence D and M but M does not influence D  
+
+Our aim is to identify which DAG is more compatible with our dataset. We do so by first identifying any *testable implications* our DAGs imply. What sort of implications do DAGs usually imply? Associations and Conditional Independence. 
+
+1. DAG 1 implies $D \not\!\perp\!\!\!\perp A$, $D \not\!\perp\!\!\!\perp M$, $A \not\!\perp\!\!\!\perp M$ - This can be tested by checking correlations between these pairs. There is no conditional independence in this model.
+2. DAG 2 implies $D \not\!\perp\!\!\!\perp A$, $M \not\!\perp\!\!\!\perp A$ and D _||_ M|A i.e. D is independent of M given A. The first 2 will be tested by correlations, the third will require some thought.  
+
+Basically, the only implication that differs between these DAGs is that D _||_ M|A. To test this, we need a statistical model that conditions on A, so we can see if that renders D independent of M, that's where multiple regression comes into play. It answers the question "Is there any additional value in knowing a variable, once I know all the other predictor variables", in our case, "Is there additional value in knowing MArriage Rate (M), once we know Median Age at Marriage (A), in order to predict Divorce Rate (D)?"  
+
+Let's build a model combining A and M and compare it to ones with only A or M and see how it impacts the coefficients.  
+
+```{r}
+library(rethinking)
+m5.3 <- quap(
+  alist(
+    D ~ dnorm(mu, sigma),
+    mu <- a + bM * M + bA * A,
+    a ~ dnorm(0, 0.2),
+    bM ~ dnorm(0, 0.5),
+    bA ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+
+plot(coeftab(m5.1, m5.2, m5.3), par = c("bA", "bM"))
+
+```
+It's not labelled but first set is for bA, second for bM.  
+1. bA - This changes very little (just becomes a bit broader) with the addition of bM
+2. bM - This changes much more, becoming close to 0 in m5.3, thus implying that it's importance reduces as we add M to the model. 
+
+> Once we know median age at marriage for a state, there is little or no additional predictive power in also knowing the rate of marriage in that State.
+
+
+This successfully proves the implication by second DAG, D _||_ M | A, hence, DAG 2 fits our model assumptions and data. We've done something great here and are a happy lot!  
+
+#### Plots to help us futrther in our quest to understand multi variable models
+
+*Predictor Residual Plots* - Quite a mouthful, eh? Basically, these help us 
+
+```{r}
+# Model for predicting marriage rate from Age at marriage
+m5.4.1 <- quap(
+  alist(
+    M ~ dnorm(mu, sigma),
+    mu <- a + bM * A,
+    a ~ dnorm(0, 0.2), # As standardized, we expect this to be close to 0
+    bM ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+mu<-link(m5.4.1)
+mu_mean <- apply(mu, 2, mean)
+d$mu_resid <- d$M - mu_mean # This is what remains after subtracting predicted marriage rate from actual marriage rate
+plot(d$A, d$mu_resid)
+lines(d$A, mu_mean)
+text(d$A, d$mu_resid, labels=d$Loc)
+
+
+# Next, let's plot model results for using Marriage rate residues to predict Divorce rate
+m5.4.2 <- quap(
+  alist(
+    D ~ dnorm(mu, sigma),
+    mu <- a + bM * mu_resid,
+    a ~ dnorm(0, 0.2),
+    bM ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+D_mu <- link(m5.4.2, n=1e4)
+D_mu.mean <- apply(D_mu, 2, mean)
+D_mu.PI <- apply(D_mu, 2, PI, prob= 0.89) # get confidence intervals for D_mu
+plot(d$mu_resid, d$D)
+lines(d$mu_resid, D_mu.mean)
+shade(D_mu.PI, d$mu_resid)
+
+```
+So, above we see the residual for each of the states, and the results of using residuals to try to predict the Divorce rate, as evident, the residuals do not make a good predictor, implying that once we "take out" the Age at marriage from MArriage rate, it's no longer a very useful predictor of divorce rate, we call this procedure as having "controlled" for MArriage age. Let's see same result but this time "controlling" for MArriage Rate. 
+
+```{r}
+# Model for predicting marriage rate from Age at marriage
+m5.4.3 <- quap(
+  alist(
+    A ~ dnorm(mu, sigma),
+    mu <- a + bM * M,
+    a ~ dnorm(0, 0.2), # As standardized, we expect this to be close to 0
+    bM ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+mu<-link(m5.4.3)
+mu_mean <- apply(mu, 2, mean)
+d$A_mu_resid <- d$A - mu_mean # This is what remains after subtracting predicted marriage rate from actual marriage rate
+plot(d$M, d$A_mu_resid)
+lines(d$M, mu_mean)
+text(d$M, d$A_mu_resid, labels=d$Loc)
+
+
+# Next, let's plot model results for using Marriage rate residues to predict Divorce rate
+m5.4.2 <- quap(
+  alist(
+    D ~ dnorm(mu, sigma),
+    mu <- a + bA * A_mu_resid,
+    a ~ dnorm(0, 0.2),
+    bA ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+D_mu <- link(m5.4.2, n=1e4)
+D_mu.mean <- apply(D_mu, 2, mean)
+D_mu.PI <- apply(D_mu, 2, PI, prob= 0.89) # get confidence intervals for D_mu
+plot(d$A_mu_resid, d$D)
+lines(d$A_mu_resid, D_mu.mean)
+shade(D_mu.PI, d$A_mu_resid)
+```
+Nice!! We see that even after controlling for the Marriage Rate, Age is still a good predictor of the Divorce Rate. Mission Accomplished! Over to next kind of plots.
+
+
+*Posterior Prediction Plots* - Simply speaking, it's to simulate the model and look at simulated outcomes. Why? To answer questions ofcourse! What questions? - let me quote directly from the book - 
+
+> Did the model correctly approximate posterior distribution? Golems do make mistakes, as do Golem engineers. Errors can be more easily diagnosed by comparing implied predictions to raw data. Some caution is required as nto all models try to exactly match the sample, but even then, you'll know what to expect from a successful approximation. We'll see some examples later ...
+
+> How does the model fail? All models are useful fictions, so they always fail in some way. Sometimes the model fits correctly but it's still so poor that it has to be discarded. More often, a model works well in some cases, and poor in others. By inspecting the cases where it fails, you might get a better idea of how to improve the model. The difficulty *(and interesting challenge)* is that this process is essentially creative and relies upon domain expertise. No robot can (yet) do this for you. It also risks chasing noise, a topic we'll discuss in later chapters. 
+
+```{r}
+# use original data to simulate mean
+mu <- link(m5.3)
+
+# summarize samples across cases
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob = 0.89)
+
+# next simulate samples using original data 
+D_sim <- sim(m5.3, n= 1e4)
+D_PI <- apply(D_sim, 2, PI, prob = 0.89)
+
+
+plot(mu_mean ~d$D, col=rangi2, ylim=range(mu_PI),
+     xlab = "Observed divorce", ylab="Predicted Divorce")
+abline(a=0, b=1, lty=2)
+for (i in 1:nrow(d)) 
+  lines(rep(d$D[i], 2), 
+        mu_PI[, i],
+        col=rangi2)
+text(x=d$D, y=mu_mean, labels=d$Loc)
+
+
+```
+
+So, we see that model overestimates divorce rates for some states while underestimating for othersm this is normal (no pun intended) for a linear model. We see that it's way out of the mark for Idaho and Utah, a domain expert would tell you this is because both states have high fraction of churchgoers and this may impact the Divorce rates, see, plotting our models performance is alwaya a good idea!  
+
+*Counter Factual plots* - 
+
+What if we could cause some intervention and change the median age at marriage for some state? Some evil dictator might pass a law forcing no marriage till 35. To study such hypothetical questions, we need a bit more assumptions about the Causal Structure as it is unlikely that one variable can take any values without other variables getting affected, so, we have to first have a Causal structure ready along with the type of influence variables exert on each other (this may not be true causal structure but should make sense and be backed by data). In our cases, we've (sort of) proved that A->D<-M<-A fits our data, let's assume variables impact mean of each other Gaussian distributions (that's our model so far for the target variable's dependence on predictor as well). 
+
+The procedure then becomes - 
+1. Build and train models for a) D | A, M and b) M | A
+1. Simulate values of A
+2. Simulate values of M | A by plugging in values of A in 1 b
+3. Plugin values of A and M to get D from our model in 1 a
+
+```{r}
+data("WaffleDivorce")
+d<-list()
+d$A <- standardize(WaffleDivorce$MedianAgeMarriage)
+d$M <- standardize(WaffleDivorce$Marriage)
+d$D <- standardize(WaffleDivorce$Divorce)
+
+m5.3_A <- quap(
+  alist(
+    ## A-> D <- M
+    D ~ dnorm(mu, sigma),
+    mu <- a + bM * M + bA * A,
+    a ~ dnorm(0, 0.2),
+    bM ~ dnorm(0, 0.5),
+    bA ~ dnorm(0, 0.5),
+    sigma ~ dexp(1),
+  ## A -> M
+  M ~ dnorm(mu_M, sigma_M),
+  mu_M <- aM + bAM * A,
+  aM ~ dnorm(0, 0.2),
+  bAM ~ dnorm(0, 0.5),
+  sigma_M ~ dexp(1)
+),
+data=d)
+
+
+# Generate hypothetical values for A to simulate 
+A_seq <- seq(from = -2, to = 2, length.out = 30)
+
+# prep data 
+sim_dat <- data.frame(A=A_seq)
+
+# simulate M (coz we started with a DAG which implies causation from A -> M) and then D using A_seq
+s <- sim(m5.3_A, data=sim_dat, vars = c("M", "D"))
+
+
+# Display counterfactual predictions !
+plot(sim_dat$A, colMeans(s$D), ylim=c(-2, 2), type="l", xlab = "manipulated A", ylab="counterfactual D")
+shade(apply(s$D, 2, PI), sim_dat$A)
+mtext("Total Counterfactual effect of A on D")
+
+
+
+sim_dat <- data.frame(M = seq(from=-2, to=2, length.out = 30), A =0)
+s<- sim(m5.3_A, data=sim_dat, vars="D")
+
+plot(sim_dat$M, colMeans(s), ylim=c(-2, 2), type="l",
+     xlab = "manipulated M", ylab="counterfactual D")
+shade(apply(s, 2, PI), sim_dat$M)
+mtext("Total counterfactual effect of M on D")
+
+```
+
+As we can see, manipulating A affects D a lot whereas manipulating M does not, another way to look at things!
+
+## Uncover Masked Relationship
+
+```{r}
+library(rethinking)
+# This dataset talk about milk composition across different species
+data(milk)
+d<-milk
+str(d)
+```
+
+A popular hypothesis is that primates with bigger brains produce more energetic milk, so that brains can grow quickly. Questions like this are very difficult to answer due to several nuanced issues, we'll look at more of these nuances in later posts. 
+* *kcal.per.g* Kilocalories of energy per gram of milk
+* *mass* Average body mass of female
+* *neocortex.perc* Percentage of total brain mass that is neocortex mass
+
+The question here is to what extent is the energy of milk dependent on the percentage of gray, outer part of brain (neocortex). We'll see that this relationship depends on female body mass as well.  
+
+```{r}
+d$K <- scale(d$kcal.per.g)
+d$N <- scale(d$neocortex.perc)
+d$M <- scale(d$mass)
+
+```
+First model is simple bivariate regression, let's still list it down for practive : 
+
+
+\begin{align*}
+K_i &\sim Normal(\mu_i, \sigma)
+\mu_i &= \alpha + \beta_n*N_i
+\end{align*}
+
+```{r}
+dcc <- d[complete.cases(d$K, d$N, d$M),] # drop incomplete points
+m5.5_draft <- quap(
+  alist(
+    K ~ dnorm(mu, sigma),
+    mu <- a + bN * N,
+    a ~ dnorm(0, 0.2), # As both are normalized, this should typically be close to zero
+    bN ~ dnorm(0, 0.5), # Can't have impossibly strong relationships - this intuition comes from practice and looking at the data, and probably domain knowledge
+    sigma ~ dexp(1)
+  ),
+  data=dcc
+)
+
+# Plot the priors, always unless you are extremely confident in your guess, still do it though
+
+prior <- extract.prior(m5.5_draft)
+xseq <- seq(from=-2, to= 2, length.out = 30)
+mu <- link(fit=m5.5_draft, post=prior, data = list(N=xseq))
+plot(NULL, xlim = range(xseq), ylim = range(xseq))
+for (i in 1:50) 
+  lines(xseq, mu[i, ], col = col.alpha("black", 0.3))
+
+precis(m5.5_draft)
+
+```
+
+We see that bN has a much wider std than it's mean, implying a very low confidence in model's prediction. Let's do the following:
+
+1. Model K using N
+2. Model K using M
+3. Model K using both M and N and compare the coefficients
+
+```{r}
+
+analyze_univariate_multivariate_models <- function(data) {
+  # M = function(N)
+  mf.1 <- quap(
+    alist(
+      K ~ dnorm(mu, sigma),
+      mu <- a + bN * N,
+      a ~ dnorm(0, 0.2),
+      bN ~ dnorm(0, 0.2),
+      sigma ~ dexp(1)
+    ),
+    data=data
+  )
+  # M = function()
+  mf.2 <- quap(
+    alist(
+      K ~ dnorm(mu, sigma),
+      mu <- a + bM * M,
+      a ~ dnorm(0, 0.2),
+      bM ~ dnorm(0, 0.2),
+      sigma ~ dexp(1)
+    ),
+    data=data
+  )
+  # M = function(N)
+  mf.3 <- quap(
+    alist(
+      K ~ dnorm(mu, sigma),
+      mu <- a + bN * N + bM * M,
+      a ~ dnorm(0, 0.2),
+      bN ~ dnorm(0, 0.2),
+      bM ~ dnorm(0, 0.2),
+      sigma ~ dexp(1)
+    ),
+    data=data
+  )
+  plot(coeftab(mf.1, mf.2, mf.3), pars = c("bM", "bN"))
+}
+
+
+analyze_univariate_multivariate_models(dcc)
+
+```
+
+What do we see? Both the mass and Neocortex percentage influence Milk composition more strongly now that both are present. bM almost increases 3 times.
+
+Now, can we say something about the underlying causal structure? We can say that it conforms to more than one DAG, as all variables show association with each other, the conditional independence it implies can be met by a few candidates - 
+1. M->K<-N , M->N
+2. M->K<-N , N<-M
+3. M<-c->N , M->K<-N - Here, C is some unobserved variable which directly influences M and N but as cannot observe it, it's not possible (atleast yet) to control for it and figure out if this is indeed the right model
+
+All the above are known as being part of a *Markov Equivalence* set. To generate all Markov equivalence sets for a given DAG - 
+
+```{r}
+library(dagitty)
+dag5.7 <- dagitty("dag{
+                  M -> K <- N
+                  M -> N}")
+MElist <- equivalentDAGs(dag5.7)
+print(MElist)
+```
+
+So, there are 7 DAGs in this Markov Equivalence set.
+
+To really bring home the point that several underlying causal models can generate similar statistics, let's simulate some datasets and redo the analysis, thankfully, we defined a function above to do the analysis.
+
+```{r}
+# M<-c->N M->K<-N
+n<-100 # dataset size
+C <- rnorm(n)
+N <- rnorm(n, C)
+M <- rnorm(n, C)
+K <- rnorm(n, N-M)
+d_sim3 <- data.frame(K=K, N=N, M=M)
+
+
+# M->K<-N N<-M
+M <- rnorm(n)
+N <- rnorm(n, M)
+K <- rnorm(n, N-M)
+d_sim2 <- data.frame(K=K, N=N, M=M)
+
+analyze_univariate_multivariate_models(d_sim3)
+analyze_univariate_multivariate_models(d_sim2)
+
+```
+
+See? All cases show similar coefficient stats, this means the underlysing Caisal model will remain opaque for us, at least for now. 
+
+
+### Handling categorical variables
+
+We create an array of parameters, indexed by the categorical variable - 
+
+```{r}
+d$clade_id <- as.integer(d$clade)
+d$K <- scale(d$kcal.per.g)
+m5.9 <- quap(
+  alist(
+    K ~ dnorm(mu, sigma),
+    mu <- a[clade_id],
+    a[clade_id] ~ dnorm(0, 0.5), # Alittle wider prior as we want to give a chance to the parameters to diverge for different clades
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+
+labels <- paste(levels(d$clade))
+plot(precis(m5.9, depth=2, pars="a"), labels=labels,
+     xlab = "expected kcal (std)")
+```
+
+There we go! 
