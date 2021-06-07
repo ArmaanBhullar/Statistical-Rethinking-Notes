@@ -1,0 +1,105 @@
+---
+---
+title: "Chapter - 6: What to add and what not to add to Bayesian Models"
+output: 
+  html_document:
+    number_sections: true
+---
+---
+
+To summarize (straight from the book)- 
+
+> Multiple Regression is no oracle. It is logical, but the relationships it describes are *conditional associations*, not causal influences. Therefore, additional information, from outside the model, is needed to make sense of it. This chapter *presents* introductory examples *with simulations* to show some common frustations: multicollinearity, post-treatment bias, and collider bias. Soltions to these frustations can be organized under a coherent framework in which hypothetical causal relations among variables are analyzed to *locate* and cope with *confounding*. In all cases, causal models *discussed* exist outside the statistical model and can be difficult to test. However, it is possible to reach valid causal inferences in the absence of experiments. This is good news, because we often cannot perform experiments, both for practical and ethical reasons. 
+
+
+Allright, let's dive right in, here's the agenda - 
+1. (Exciting!) Simulate few examples to show common confounds (this word, will make itself clear as we move along)
+2. (Meh ..) Go back to theory and develop it a bit
+3. (Very Exciting!) Take the thory, apply to examples in 1. and make sense of it
+
+
+# Example 1 - Why are news articles that sound sensational less likely to be trustworthy?
+
+Often we read newspapers and observe the above effect, same with reading Scientific journals or even reading lists of projects which have been awarded Scientific grants. Our question is - "Do news articles with higher sensational content less likely to be factually correct?" The answer is - "The data does not justify this observation as this effect can be observed even if all news articles are equally likly to be sensational and trustworthy". Let's simulate and see
+
+```{r}
+# Simulate n articles with independent truth and sensational content.
+n = 1000
+
+truth <- rnorm(n)
+sensational <- rnorm(n)
+
+# Editor chooses the top 10% to publish - combining both the scores
+score <- truth+sensational
+chosen <- score > quantile(score, prob=0.9)
+plot(x = truth, y = sensational, col = (chosen+3)/2)
+cor(truth[chosen], sensational[chosen])
+
+```
+
+So, the red points, clearly show a negative correlation - this does not mean the news articles which are trustworthy are not sensational, but rather this is *after* we select the news articles that this is observed. This is called as *BERKSON'S PARADOX* or more helpfully as *selection-distortion* effect.  
+
+
+# Example 2: Multicollinear legs - IS length of legs a strong predictor of a person's height?
+
+If you think Yes, then go through below -
+
+```{r}
+library(rethinking)
+N<-100
+height <- rnorm(N, 10, 2) # simulate height
+legs_proportion <- runif(N, 0.4, 0.5) # Assign proportion of a person's leg length as from a uniform distribution
+left_leg <- legs_proportion*height + rnorm(N, 0, 0.02) # Add a developmental process tweak to leg length of about 1/50th of the height
+right_leg <- legs_proportion*height + rnorm(N, 0, 0.02)
+
+d <- data.frame(height, left_leg, right_leg)
+
+# Build a model to see how leg length affects height of a person
+
+m6.1 <- quap(alist(
+  height ~ dnorm(mu, sigma),
+  mu <- a + b_left*left_leg + b_right*right_leg,
+  a ~ dnorm(10, 100), # A vastly flat prior so our observation is not dented by choice of prior
+  b_left ~ dnorm(2, 10), # We expect positive effect of leg length on height but not too sure about it's range
+  b_right ~ dnorm(2, 10),
+  sigma ~ dexp(1)),
+ data = d)
+
+plot(precis(m6.1))
+
+```
+
+
+a_left and a_right have huge uncertainity in their values! What explains this? Does this mean our model does not have a strong view on their importance on the height of the person? Let's also try the model this time with only one leg
+
+```{r}
+m6.2 <- quap(alist(
+  height ~ dnorm(mu, sigma),
+  mu <- a + b_left*left_leg,
+  a ~ dnorm(10, 100), # A vastly flat prior so our observation is not dented by choice of prior
+  b_left ~ dnorm(2, 10), # We expect positive effect of leg length on height but not too sure about it's range
+  sigma ~ dexp(1)),
+ data = d)
+
+precis(m6.2)
+```
+This time model is much more confident, why's this? 
+
+The question we ask our model when doing multiple regression is not "How important is left leg's length for predicting height?" but "How much additional information does having left leg's length provide given we already know right leg's length?" The problme is not in the model, but in the question we are asking.  
+
+To look at another way, let's look at the posterior samples of b_left and b_right and see.
+
+
+```{r}
+post <- extract.samples(m6.1)
+plot(b_left ~ b_right, post)
+dens(post$b_left+post$b_right)
+```
+
+As is clear, the joint distribution of b_left and b_right does show certainity, it shows extremely high correlation. 
+
+
+Another way to look at it is that our model says (assuming both left and right leg are perfectly correlated, implying they are both equal in this case to left_length) -   
+mean of height = a + b_left x left_length + b_right x right_length $\sim$ a + (b_left + b_right) x left_length
+
+Hence, our lienar regression is essentially learning a joint distribution as shown in second plot above.  
