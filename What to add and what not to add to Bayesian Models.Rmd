@@ -102,4 +102,262 @@ As is clear, the joint distribution of b_left and b_right does show certainity, 
 Another way to look at it is that our model says (assuming both left and right leg are perfectly correlated, implying they are both equal in this case to left_length) -   
 mean of height = a + b_left x left_length + b_right x right_length $\sim$ a + (b_left + b_right) x left_length
 
-Hence, our lienar regression is essentially learning a joint distribution as shown in second plot above.  
+Hence, our linear regression is essentially learning a joint distribution as shown in second plot above.  
+
+# Example 3 - Multicollinear Milk
+
+Let's look at a more advanced and practical situation now - Let's look at milk composition of primates, specifically, how the energy density of the milk relates to it's fat content and lactose content. Let's build 3 models - one for energy ~ fat, energy ~ lactose, energy ~ fat + lactose
+
+```{r}
+library(rethinking)
+data(milk)
+d <- milk
+# Standardize
+d$K <- scale(d$kcal.per.g)
+d$F <- scale(d$perc.fat)
+d$L <- scale(d$perc.lactose)
+
+# energy ~ fat
+m6.3 <- quap(
+  alist(
+    K ~ dnorm(mu, sigma),
+    mu <- a + bF * F,
+    a ~ dnorm(0, 0.2),
+    bF ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+
+
+# energy ~ lactose
+m6.4 <- quap(
+  alist(
+    K ~ dnorm(mu, sigma),
+    mu <- a + bL * L,
+    a ~ dnorm(0, 0.2),
+    bL ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+
+
+# energy ~ lactose + fat
+m6.5 <- quap(
+  alist(
+    K ~ dnorm(mu, sigma),
+    mu <- a + bF * F + bL * L,
+    a ~ dnorm(0, 0.2),
+    bL ~ dnorm(0, 0.5),
+    bF ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data=d
+)
+
+plot(coeftab(m6.3, m6.4, m6.5, rotate = TRUE)) # plots models on y axis in that order from top to bottom
+
+```
+
+Observations - 
+1. bF and bL have much tighter estimates in their original model than in the combined model - This is because they have a joint axis of variation along which they both can take a large range of values in the combined model
+2. Combined model assigns much lower estimate to bF than in it's original model - this means one cannot simply say by looking at combined model "Fat content in milk does not explain it's energy content", instead we should say "Once the model knows the LActose content of milk it's fat content is relatively less important"
+
+
+Now, how do we figure this out without actually building the models? We will look at a much more general and sophisticated theory shortly but for now, let's look at the pairwise correlations - 
+
+```{r}
+pairs(~kcal.per.g + perc.fat + perc.lactose, data=d, col = rangi2)
+```
+
+The middle right plot clearly shows the huge correlation between Fat and Lactose, it's this correlation which is confounding as the fat and energy have an otherwise strong correlation, it's just that lactose and energy have a stronger one. 
+
+So, what should we conclude from this example? 
+
+> In Scientific literature (*or even in professional Data Scientist world*), there are several dodgy ways of coping with multicollinearity. Few of these take a causal perspective. ... In some cases people just inspect the pairwise correlations and drop the highly correlated predictors. This is a mistake. Pairwise correlations are not the problem, it's the conditional associations that matter. The right thing (not easy) depends on what is causing the collinearity. Associations within the data are not enough to tell us what to do, what would help is to have a causal model. 
+
+> The likely scenario in the milk example is that there's a third variable influencing both L and K. For mothers, it's a tradeoff between Fat and Lactose content which ultimately depends on how Dense the milk is. Species which nurse often have lower density of milk with a higher lactose content. Thus, idieally, we should look at the Density of Milk and not Fat and Lactose content which are themselves a variable of it to predict the Energy Density. The causal graph is - 
+
+```{r}
+ library(dagitty)
+dag_milk <- dagitty("dag {
+                      D [unobserved]
+                      L <- D -> F
+                      L -> K <- F
+}")
+plot(dag_milk)
+```
+The problem of multicollinearity is a member of a family of problems known as NON-IDENTIFIABILITY which says that the structure of the problem and the data do not make it possible to estimate the parameter's value. In Bayesian analysis, the problem is nto as much as non-identifiability as we still have the parameter estimates but one of weak identifiability as the estimates are not very confident.  
+
+# Post-treatment bias - Is my Anti Fungal treatment working? 
+
+Suppose you gro tomatoes but unfortunately have started seeing some fungus which you think is impacting their height, you want to know if using some fungicide will help their growth or not. Being a true scientist, you setup an experiment in  a greenhouse by growing the tomato plants on 2 kinds of beds - one has been treated with fungicides and the other is not. You then measure height of plants at germination and 5 weeks later - measuring the initial height, final height, treatment or not and presence of fungus at the end. 
+
+You know want to find if your treatment is causing the height of plants to increase or not. Let's simulate some data to get going
+
+```{r}
+# Number of plants
+N <- 100
+
+# Initial heights
+h0 <- rnorm(N, 10, 2)
+
+# assign treatment and simulate fungus and growth 
+treatment <- rep(0:1, each=N/2)
+fungus <- rbinom(N, size=1, prob=0.5 - treatment * 0.4)
+h1 <- h0 + rnorm(N, 5-3*fungus)
+
+d <- data.frame(h0, h1, treatment, fungus)
+precis(d)
+```
+
+Now let's build our model
+
+
+```{r}
+m6.6 <- quap(
+  alist(
+    h1 <- dnorm(mu, sigma),
+    mu <- h0 * p,
+    p ~ a + bt * treatment + bf * fungus,
+    a ~ dlnorm(0, 0.25),
+    bt ~ dnorm(0, 0.5),
+    bf ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data = d
+)
+precis(m6.6)
+```
+
+So the model above says our treatment has not impact on plant height at all! :(  
+Despair not, this is just a case of post treatment bias as when we included the presence of fungus in our model, we eliminated any need for the model to know the treatment as fungus alone explains all the height. This is becasue fungus really is a *post-treatment* variable and hence should not be included if we want to measure the impact of our treatment on plant height. Let's do another turn, without the fungus - 
+
+```{r}
+m6.7 <- quap(
+  alist(
+    h1 <- dnorm(mu, sigma),
+    mu <- h0 * p,
+    p ~ a + bt * treatment,
+    a ~ dlnorm(0, 0.25),
+    bt ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ),
+  data = d
+)
+precis(m6.7)
+```
+
+
+This model shows a clear positive impact of treatment on plant height! Yay! our treatment works!
+
+
+In terms of the causal graph - 
+
+```{r}
+plant_dag <- dagitty("dag {
+                     H_0 -> H_1
+                     F -> H_1
+                     T -> F
+}")
+drawdag(plant_dag)
+```
+
+The moment we condition on F (i.e., include F in our model), we block the path from T to H1, that's what happened in our first model.  Techincally speaking, F induces a *D-SEPARATION* (D for directional). Thus, H1 is d-separated from 
+T when we condition on F. 
+
+
+It's not just that adding a variable can block the association, it can also cause an association where there is None, consider following DAG - 
+
+```{r}
+plant_dag <- dagitty("dag {
+                     M [unobserved]
+                     H_0 -> H_1
+                     M -> F
+                     M -> H_1
+                     T -> F
+}")
+drawdag(plant_dag)
+```
+
+In above case, M is a hidden variable (could be Moisture, for e.g.) and T is not really associated with H1, neither is F (maybe this fungus species does not bother the plant), however, if we did add F to our model, we would observe an association between T and H1, because including F, provides indirect info about M which in turn really does impact the plant height. 
+
+This brings us to our next example, one of COLLIDER-BIAS
+
+# Collider Bias - Is Happiness a function of Age ?
+
+Let's move on to a more interesting (and provocative!) question. Why do we focus so much on simulations? Well, it allows us to control the relationships in our example and if a procedure can't figure out truth in a simulated example, it can't in a real example as well.
+
+
+1. Each year, 20 people are born with uniformly simulated happiness values
+2. Each year, person ages by 1 year, happiness does not change
+3. At age 18, individuals can become married. The odds of marriage each year are proportional to an individual's happiness
+4. Once married, stay married
+5. After age 65, they leave the sample (move to Bahamas!)
+
+```{r}
+library(rethinking)
+d <- sim_happiness(seed=1977, N_years=1000)
+precis(d)
+head(d)
+```
+
+So we are viewing a Snapshot of this universe at year 1000 with about 1300 people. Why 1300? That's 20x65.  
+
+
+```{r}
+plot(d$age, d$happiness, col=d$married+1)
+
+```
+
+Note that if we plotted only the red points (married folks), it would seem as if happiness decreases with age, which is clearly not the case in our simulation, this is an example of Confounding.
+
+Anyways, you come across this data and want to analyze if Age impacts happiness, you reason that Marriage may be an important factor and try to control for it. The linear model is 
+
+$$ \mu_i = \alpha_{MID[i]} + \beta_A A_i$$
+
+```{r}
+d2 <- d[d$age>17, ] # Only adults
+d2$A <- (d2$age - 18) / (65-18) # Normalize
+d2$mid <- d2$married + 1 # construct indicator, has to start with 1 as is the array index in below model
+
+m6.9 <- quap(
+  alist(
+    happiness ~ dnorm(mu, sigma),
+    mu <- a[mid] + bA*A,
+    a[mid] ~ dnorm(0, 1), # At age 18, this allows 95% of mass in the happiness range -2 to 2
+    bA ~ dnorm(0, 2), # Over lifetime, we say the plausibility of happiness going from -2 to 2 is within 2 SDs
+    sigma ~ dexp(1)
+    
+  ), data=d2
+)
+
+precis(m6.9, depth = 2) # Depth controls if we want to see the array variables or not
+```
+
+Allright, it's quite sure that age has negative effect on happiness, how about we omit the marriage status?
+
+```{r}
+m6.10 <- quap(
+  alist(
+    happiness ~ dnorm(mu, sigma),
+    mu <- a + bA*A,
+    a ~ dnorm(0, 1),
+    bA ~ dnorm(0, 2),
+    sigma ~ dexp(1)
+  ),
+  data=d2
+)
+precis(m6.10)
+```
+
+This model correctly infers that Age and Happiness are uncorrelated. 
+
+Thing is, Marriage is a collider variable, it's a function of both age and happiness and hence, including marriage forces our model to create a connection between Age and Happiness, we should identify and exclude Colliders from our input features if we're assigning causal interpretations to parameter values.  
+
+# Haunted DAG - There may be hidden variables you're not accounting for in your DAG!
+
+
+
+
