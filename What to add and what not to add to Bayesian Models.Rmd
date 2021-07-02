@@ -358,6 +358,100 @@ Thing is, Marriage is a collider variable, it's a function of both age and happi
 
 # Haunted DAG - There may be hidden variables you're not accounting for in your DAG!
 
+As a final demonstration, let's look at a case where a Hidden variable causes misleading analysis.
+
+What's the impact of Grandparent's and Prarent's education achievements on their children? 
+
+```{r}
+library(dagitty)
+dag_edu <- dagitty("dag {
+                      U [unobserved]
+                      C <- P <- G
+                      C <- G
+                      C <- U -> P
+}")
+plot(dag_edu)
+```
+Here, we are interested in understanding direct impact of P and G on C, assume their's a hidden variable U which impacts both P and C, (like neighborhood), G have all moved to Bangkok
+
+Let's simulate some data
+
+```{r}
+N <- 500 # Number of simulations - GPC pairs
+b_GP <- 1 # impact of G on P's education
+b_PC <- 1
+b_GC <- 0 # we'll try to infer this
+b_U <- 2 # U has a strong impact on both P and C
+
+set.seed(1)
+U <- 2*rbern(N, prob=0.5) - 1 # ranges from 1 to -1
+G <- rnorm(N)
+P <- rnorm(N, b_GP*G + b_U*U)
+C <- rnorm(N, b_GC*G + b_PC*P + b_U*U)
+d <- data.frame(C=C, P=P, G=G, U=U)
+
+# Now, you've just come across this data and want to study effect of G on C, but don't know about existance of U, which is unobserved, we need to control for P, so let's do that by adding it in model
+m6.11 <- quap(
+  alist(
+    C ~ dnorm(mu, sigma),
+    mu <- a + bG*G + bP*P,
+    a ~ dnorm(0, 2),
+    bG ~ dnorm(0, 2),
+    bP ~ dnorm(0, 2),
+    sigma ~ dexp(2)
+  ),
+  data=d
+)
+precis(m6.11)
+```
+
+What! if we were to (erronously as always!) use the coefficients as the providing Causal strength, then we would infer Grandparents education has a negative relation to the Child's! 
+
+So what went wrong? Well, the unobserved variable, which has a much greater effect,  must be at fault? Let's do a plot
+
+
+```{r}
+plot(x=d$G, y=d$C, col=(d$U+3))
+plot(x=d$G, y=d$C, col=(d$P<0))
+```
+Note that - 
+
+1. Plot 1 - The 2 clouds represent 2 values of U, Black is the bad neighborhood, within the clouds, we see a positive relation between G and C, why? because G influences C indirectly through P
+
+2. Plot 2 - Now, if we were to control for parents, by marking points within certain percentile, say bottom 50 %ile, then draw a line, we'd see a -ve slope! That's coz bottom 50%il parents also have low education children and that impact is much stronger than what comes through Grandparents
+
+
+What if we include U? 
+
+```{r}
+m6.12<- quap(
+  alist(
+    C ~ dnorm(mu, sigma),
+    mu <- a + bG*G + bP*P + bU*U,
+    a ~ dnorm(0, 2),
+    bG ~ dnorm(0, 2),
+    bP ~ dnorm(0, 2),
+    bU ~ dnorm(0, 2),
+    sigma ~ dexp(2)
+  ),
+  data=d
+)
+precis(m6.12)
+```
+
+Ah, now model assigns very low importance to bG, in line with our simulation (of course it does! we've accounted for all variables we can) but this can't always be the case as we don't know any unobserved variables in the first place! :( 
+
+
+<TODO - Add more thoughts on why it happened>
+
+
+# What's the correct procedure to do this then?
+
+
+
+
+
+
 
 
 
